@@ -1,0 +1,7 @@
+# 统一换行：源码一律 LF 入库，Windows 脚本保留 CRLF
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.jar binary
+*.png binary
+*.apk binary
