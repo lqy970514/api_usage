@@ -8,6 +8,9 @@ import java.util.Locale
 /** 金额统一 $x.xx。 */
 fun money(value: Double): String = "$" + String.format(Locale.US, "%.2f", value)
 
+/** 智谱积分绝对值：28000 → "28,000"。 */
+fun credits(value: Double): String = String.format(Locale.US, "%,.0f", value)
+
 fun percentText(percent: Double?): String =
     if (percent == null) "--" else String.format(Locale.US, "%.0f%%", percent)
 

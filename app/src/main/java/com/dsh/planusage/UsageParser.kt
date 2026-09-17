@@ -114,6 +114,97 @@ internal object UsageParser {
         return ProviderSnapshot(ok = true, windows = windows, facts = facts)
     }
 
+    // ── 智谱 GLM Coding Plan ─────────────────────────────────────────────
+
+    /** 积分额度（5h / 周），官方文档口径；绝对值要用 data.level 换算，响应里没有分母。 */
+    private val ZHIPU_ALLOWANCE = mapOf(
+        "lite" to (2_000 to 10_000),
+        "pro" to (12_000 to 60_000),
+        "max" to (28_000 to 140_000),
+    )
+
+    private val ZHIPU_LEVEL_NAME = mapOf("lite" to "Lite", "pro" to "Pro", "max" to "Max")
+
+    /**
+     * `GET {host}/api/monitor/usage/quota/limit` 的响应体。
+     *
+     * GLM Coding Plan 只有 **5 小时 + 周** 两个窗口（没有月度），`unit` 才是窗口标识：
+     * `3` = 5 小时、`6` = 每周。**不能按 nextResetTime 排序分桶**——周期末尾每周窗口
+     * 可能比 5 小时窗口更早重置，排序会把两个桶标反。
+     */
+    fun zhipu(root: JSONObject, hostLabel: String): ProviderSnapshot {
+        val code = root.optDoubleOrNull("code")?.toInt() ?: 200
+        if (code != 200) {
+            val msg = root.optStringOrNull("msg") ?: "未知错误"
+            return ProviderSnapshot(ok = false, error = "智谱返回 code=$code：$msg")
+        }
+        val data = root.optJSONObject("data")
+            ?: return ProviderSnapshot(ok = false, error = "响应里没有 data 字段，上游可能已变更")
+        val limits = data.optJSONArray("limits")
+            ?: return ProviderSnapshot(ok = false, error = "响应里没有 limits 字段，上游可能已变更")
+
+        // 逐条防御：只收编码积分窗口；TIME_LIMIT 是联网搜索/网页读取这类 MCP 工具额度，
+        // 不是编码 token 额度，按文档直接忽略。
+        val entries = mutableListOf<ZhipuEntry>()
+        for (i in 0 until limits.length()) {
+            val item = limits.optJSONObject(i) ?: continue
+            val type = item.optStringOrNull("type")?.uppercase() ?: continue
+            if (type != "TOKENS_LIMIT" && type != "CREDIT_LIMIT") continue
+            val percent = item.optDoubleOrNull("percentage") ?: continue
+            entries += ZhipuEntry(
+                unit = item.optDoubleOrNull("unit")?.toInt(),
+                percent = percent.coerceIn(0.0, 100.0),
+                // nextResetTime 是毫秒时间戳，不是 ISO 字符串。
+                resetsAt = item.optLongOrNull("nextResetTime"),
+            )
+        }
+        if (entries.isEmpty()) {
+            return ProviderSnapshot(ok = false, error = "未找到 5 小时 / 周用量窗口，上游可能已变更结构")
+        }
+
+        var fiveHour: ZhipuEntry? = null
+        var weekly: ZhipuEntry? = null
+        val unclassified = mutableListOf<ZhipuEntry>()
+        for (entry in entries) {
+            when (entry.unit) {
+                3 -> if (fiveHour == null) fiveHour = entry else unclassified += entry
+                6 -> if (weekly == null) weekly = entry else unclassified += entry
+                else -> unclassified += entry
+            }
+        }
+        // unit 缺失或不认识时的兜底（对齐 cc-switch）：无 nextResetTime 的优先归 5h，
+        // 其余按 reset 升序填空位。老套餐只返回 1 条，自然降级为只显示 5h。
+        unclassified.sortWith(compareBy({ if (it.resetsAt == null) 0 else 1 }, { it.resetsAt ?: 0L }))
+        for (entry in unclassified) {
+            if (fiveHour == null) fiveHour = entry else if (weekly == null) weekly = entry
+        }
+
+        val level = data.optStringOrNull("level")
+        val allowance = level?.lowercase()?.let { ZHIPU_ALLOWANCE[it] }
+
+        val windows = mutableListOf<UsageWindow>()
+        fiveHour?.let { windows += zhipuWindow("5 小时", it, allowance?.first) }
+        weekly?.let { windows += zhipuWindow("周", it, allowance?.second) }
+
+        val facts = buildList {
+            if (level != null) add("套餐" to (ZHIPU_LEVEL_NAME[level.lowercase()] ?: level))
+            add("站点" to hostLabel)
+        }
+        return ProviderSnapshot(ok = true, windows = windows, facts = facts)
+    }
+
+    /** TOKENS_LIMIT 只给百分比，绝对值 = percentage% × 套餐额度。 */
+    private fun zhipuWindow(title: String, entry: ZhipuEntry, cap: Int?): UsageWindow = UsageWindow(
+        title = title,
+        usedText = if (cap != null) {
+            "≈ ${credits(entry.percent / 100 * cap)} / ${credits(cap.toDouble())} 积分"
+        } else {
+            "已用 ${percentText(entry.percent)}"
+        },
+        percent = entry.percent,
+        resetsAtMs = entry.resetsAt,
+    )
+
     private fun windowOf(title: String, window: JSONObject): UsageWindow {
         val used = window.optDoubleOrNull("used") ?: 0.0
         val cap = window.optDoubleOrNull("cap") ?: 0.0
@@ -129,6 +220,13 @@ internal object UsageParser {
 }
 
 // ── JSON 取值小工具：区分「字段缺失」与「字段为 0」 ────────────────────────
+
+/** 智谱 limits[] 里一条编码积分窗口（分桶前的中间结构）。 */
+private data class ZhipuEntry(
+    val unit: Int?,
+    val percent: Double,
+    val resetsAt: Long?,
+)
 
 internal fun JSONObject.optDoubleOrNull(name: String): Double? =
     if (has(name) && !isNull(name)) optDouble(name).takeIf { !it.isNaN() } else null

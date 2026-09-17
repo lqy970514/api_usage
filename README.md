@@ -1,27 +1,27 @@
 # 套餐用量（PlanUsage）
 
-一个**架构极简**的 Android 用量看板：填入 OpenCode Go 与 Command Code GOAT 的 API Key，
-点「刷新」即可查看 **5 小时 / 周 / 月度** 三个窗口的已用额度与重置倒计时。
-显示逻辑对齐 cc-switch 的 Token Plan 面板（三档窗口 + 百分比进度条 + 重置倒计时），
+一个**架构极简**的 Android 用量看板：填入 OpenCode Go、Command Code GOAT、智谱 GLM Coding Plan
+的 API Key，点「刷新」即可查看各窗口的已用额度与重置倒计时。
+显示逻辑对齐 cc-switch 的 Token Plan 面板（多档窗口 + 百分比进度条 + 重置倒计时），
 但界面按手机端重做：单列卡片、大点击区域、Key 折叠显示、拇指可达的刷新按钮。
 
-数据来源与解析口径完全依据 `opencode-go-command-code-goat-usage.md`。
+数据来源与解析口径依据 `opencode-go-command-code-goat-usage.md` 与 `glm-coding-plan-usage.md`。
 
 ## 架构（单模块，无第三方网络库）
 
 ```
 app/src/main/java/com/dsh/planusage/
-├── MainActivity.kt   界面：Scaffold + 两张服务商卡片 + 自绘进度条（Compose）
+├── MainActivity.kt   界面：Scaffold + 三张服务商卡片 + 自绘进度条（Compose）
 ├── UsageApi.kt       网络层：HttpURLConnection + 中文错误提示
 ├── UsageParser.kt    纯解析层：org.json 逐窗口防御性解析（不碰 Android API，可单测）
-├── Models.kt         UsageWindow / ProviderSnapshot 两个数据类
-├── Prefs.kt          SharedPreferences 存 Key（应用私有目录）
-└── Format.kt         金额 / 百分比 / 倒计时 / 时间格式化
+├── Models.kt         UsageWindow / ProviderSnapshot / ZhipuHost
+├── Prefs.kt          SharedPreferences 存 Key 与智谱站点选择（应用私有目录）
+└── Format.kt         金额 / 积分 / 百分比 / 倒计时 / 时间格式化
 ```
 
 - **依赖只有**：Compose BOM、Material3、activity-compose、core-ktx、coroutines。
-  没有 Retrofit / OkHttp / Hilt / Room / 导航库——两个接口、两个页面状态，用不上。
-- **状态**：`AppScreen()` 里的 `remember { mutableStateOf }`，没有 ViewModel、没有仓库层。
+  没有 Retrofit / OkHttp / Hilt / Room / 导航库——三个接口、一张卡片状态，用不上。
+- **状态**：`AppScreen()` 里的 `CardState`（`remember { mutableStateOf }`），没有 ViewModel、没有仓库层。
 - **线程**：`UsageApi` 内部 `withContext(Dispatchers.IO)`，UI 侧只 `launch`。
 - **网络**：`HttpURLConnection` + `org.json`（Android 内置），零反射零注解处理。
 - **最小 SDK 26**（Android 8.0），可直接用 `java.time`。
@@ -30,11 +30,12 @@ app/src/main/java/com/dsh/planusage/
 
 | 功能 | 说明 |
 |---|---|
-| 两个 Key 输入框 | 分别对应 OpenCode Go 与 Command Code GOAT，输入即保存，带明文/密文切换 |
-| 刷新 | 每张卡片独立刷新；顶栏按钮一次刷新两个 |
+| 三个 Key 输入框 | OpenCode Go / Command Code GOAT / 智谱 GLM，输入即保存，带明文/密文切换 |
+| 智谱站点切换 | 国内站 `open.bigmodel.cn` 与国际站 `api.z.ai` 两个 chip，选择持久化 |
+| 刷新 | 每张卡片独立刷新；顶栏按钮一次刷新全部 |
 | 冷启动自动拉取 | 已保存过 Key 时自动查询一次 |
 | 倒计时自走 | 每 30 秒重算一次「多久后重置」 |
-| 错误提示 | 401 / 403 / 404 分别给中文解释（例如 403 = Key 有效但无 Go 订阅） |
+| 错误提示 | 401 / 403 / 404 按服务商分别给中文解释（例如 403 = Key 有效但无 Go 订阅） |
 | 深色模式 | 跟随系统 |
 
 ## 解析规则（按文档）
@@ -59,13 +60,29 @@ app/src/main/java/com/dsh/planusage/
   `used = pool - (monthlyCredits + purchasedCredits + freeCredits)`。
 - 两个接口都做**逐窗口防御性解析**：单个窗口解析失败只丢那个窗口，不整体报错。
 
+**智谱 GLM Coding Plan** — `GET {host}/api/monitor/usage/quota/limit`，`Authorization: <原始 key>`
+
+- 鉴权跟 cc-switch 一致：**直接放原始 key，不加 `Bearer`**（实测带 Bearer 也能通），
+  并带 `Accept-Language: en-US,en` 让 `msg` 走英文。
+- **只有 5 小时 + 周两个窗口，没有月度**。
+- 窗口按 **`unit`** 判定：`3` = 5 小时、`6` = 每周。
+  **不按 `nextResetTime` 排序分桶**——周期末尾每周窗口可能比 5 小时窗口更早重置，排序会把两个桶标反。
+- `unit` 缺失或陌生时的兜底（对齐 cc-switch）：无 `nextResetTime` 的优先归 5 小时，
+  其余按 reset 升序填空位；老套餐只返回 1 条时自然降级为只显示 5 小时。
+- `TIME_LIMIT` 是联网搜索 / 网页读取这类 **MCP 工具额度**，不是编码 token 额度，**直接忽略**。
+- `TOKENS_LIMIT` 只给 `percentage`，绝对值 = `percentage% × 套餐额度`：
+  Lite `2,000 / 10,000`、Pro `12,000 / 60,000`、Max `28,000 / 140,000`；
+  `data.level` 读不到或认不出时**只显示百分比，不硬猜额度**。
+- `nextResetTime` 是**毫秒**时间戳，不是 ISO 字符串。
+- 团队版需要额外的 `bigmodel-organization` / `bigmodel-project` 头，**当前未实现**。
+
 ## 构建
 
 ```powershell
 # 需要 JDK 17 + Gradle 8.9 + Android SDK（compileSdk 35）
 cd plan-usage-android
 
-# 纯解析层单测（18 个用例，样本取自实测响应）
+# 纯解析层单测（27 个用例，样本取自实测响应）
 gradle testReleaseUnitTest
 
 # 出包（依赖已缓存时可加 --offline）
@@ -82,15 +99,19 @@ adb install -r app\build\outputs\apk\release\app-release.apk
 
 ### 已验证
 
-- `app-release.apk`：`com.dsh.planusage` v1.0.0，minSdk 26 / targetSdk 35，仅 `INTERNET` 权限，
+- `app-release.apk`：`com.dsh.planusage` v1.1.0，minSdk 26 / targetSdk 35，仅 `INTERNET` 权限，
   APK Signature Scheme v2 校验通过（Android Debug 证书），`usesCleartextTraffic=false`。
-- `UsageParserTest`：18 用例全绿，覆盖文档里的两份实测响应、`percent==0` 占位重置时间、
-  `rate-limited`、`exceeded`、`windowLimits` 嵌套变体、旧版扁平结构、单窗口结构异常等边界。
+- `UsageParserTest`：27 用例全绿，覆盖三份实测响应、`percent==0` 占位重置时间、
+  `rate-limited`、`exceeded`、`windowLimits` 嵌套变体、旧版扁平结构、单窗口结构异常，
+  以及智谱的 `unit` 分桶（含“按时间排序会标反”的回归样本）、`TIME_LIMIT` 忽略、
+  老套餐降级、未知 level 不硬猜额度等边界。
 - **未验证**：本机没有模拟器/真机，界面在真实设备上的显示与安装未做端到端验证。
 
 ## 注意
 
-- 两个端点都是**未文档化的私有/第一方路由**，厂商随时可能改结构；本应用不保证长期可用。
-- OpenCode Go 的用量端点只认 `Authorization: Bearer`，用 `x-api-key` 会 403。
+- 三个端点都是**未文档化的私有/第一方路由**，厂商随时可能改结构；本应用不保证长期可用。
+- OpenCode Go 的用量端点只认 `Authorization: Bearer`，用 `x-api-key` 会 403；
+  智谱反过来是原始 key（不加 Bearer），两者不能互换。
 - Key 存在应用私有 `SharedPreferences`（`/data/data/com.dsh.planusage/`），未做加密存储；
-  仅发往 `opencode.ai` 与 `api.commandcode.ai` 两个官方域名，`usesCleartextTraffic=false` 且无任何统计/上报。
+  仅发往 `opencode.ai`、`api.commandcode.ai`、`open.bigmodel.cn` / `api.z.ai` 这几个官方域名，
+  `usesCleartextTraffic=false` 且无任何统计/上报。

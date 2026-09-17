@@ -32,6 +32,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,7 +62,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -97,6 +97,24 @@ private fun AppTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = scheme, content = content)
 }
 
+// ── 一张服务商卡片的全部 UI 状态 ─────────────────────────────────────────
+
+private class CardState(
+    val label: String,
+    initialKey: String,
+    private val save: (String) -> Unit,
+    val fetch: suspend (String) -> ProviderSnapshot,
+) {
+    var key by mutableStateOf(initialKey)
+    var busy by mutableStateOf(false)
+    var snapshot by mutableStateOf<ProviderSnapshot?>(null)
+
+    fun onKeyChange(value: String) {
+        key = value
+        save(value)
+    }
+}
+
 // ── 主界面 ───────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -106,37 +124,40 @@ private fun AppScreen() {
     val prefs = remember { Prefs(context) }
     val scope = rememberCoroutineScope()
 
-    var openCodeKey by remember { mutableStateOf(prefs.openCodeKey) }
-    var commandCodeKey by remember { mutableStateOf(prefs.commandCodeKey) }
-    var openCode by remember { mutableStateOf<ProviderSnapshot?>(null) }
-    var commandCode by remember { mutableStateOf<ProviderSnapshot?>(null) }
-    var openCodeBusy by remember { mutableStateOf(false) }
-    var commandCodeBusy by remember { mutableStateOf(false) }
-    var now by remember { mutableStateOf(System.currentTimeMillis()) }
-
-    fun refreshOpenCode() {
-        val key = openCodeKey.trim()
-        if (key.isEmpty()) {
-            openCode = ProviderSnapshot(false, error = "请先填入 OpenCode Go 的 API Key")
-            return
-        }
-        openCodeBusy = true
-        scope.launch {
-            openCode = UsageApi.fetchOpenCodeGo(key)
-            openCodeBusy = false
-        }
+    var zhipuHost by remember {
+        mutableStateOf(runCatching { ZhipuHost.valueOf(prefs.zhipuHost) }.getOrDefault(ZhipuHost.CN))
     }
 
-    fun refreshCommandCode() {
-        val key = commandCodeKey.trim()
+    // fetch 闭包捕获的是 zhipuHost 的状态对象，调用时读到的永远是最新站点。
+    val openCode = remember {
+        CardState("OpenCode Go", prefs.openCodeKey, { prefs.openCodeKey = it }) {
+            UsageApi.fetchOpenCodeGo(it)
+        }
+    }
+    val commandCode = remember {
+        CardState("Command Code", prefs.commandCodeKey, { prefs.commandCodeKey = it }) {
+            UsageApi.fetchCommandCode(it)
+        }
+    }
+    val glm = remember {
+        CardState("智谱 GLM", prefs.zhipuKey, { prefs.zhipuKey = it }) {
+            UsageApi.fetchZhipu(it, zhipuHost)
+        }
+    }
+    val cards = listOf(openCode, commandCode, glm)
+
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    fun refresh(card: CardState) {
+        val key = card.key.trim()
         if (key.isEmpty()) {
-            commandCode = ProviderSnapshot(false, error = "请先填入 Command Code 的 API Key")
+            card.snapshot = ProviderSnapshot(false, error = "请先填入 ${card.label} 的 API Key")
             return
         }
-        commandCodeBusy = true
+        card.busy = true
         scope.launch {
-            commandCode = UsageApi.fetchCommandCode(key)
-            commandCodeBusy = false
+            card.snapshot = card.fetch(key)
+            card.busy = false
         }
     }
 
@@ -150,8 +171,7 @@ private fun AppScreen() {
 
     // 已保存过 Key 的话，冷启动自动拉一次。
     LaunchedEffect(Unit) {
-        if (openCodeKey.isNotBlank()) refreshOpenCode()
-        if (commandCodeKey.isNotBlank()) refreshCommandCode()
+        cards.forEach { if (it.key.isNotBlank()) refresh(it) }
     }
 
     Scaffold(
@@ -161,18 +181,18 @@ private fun AppScreen() {
                     Column {
                         Text("套餐用量", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "OpenCode Go · Command Code GOAT",
+                            "OpenCode Go · Command Code · 智谱 GLM",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
                 actions = {
-                    if (openCodeBusy || commandCodeBusy) {
+                    if (cards.any { it.busy }) {
                         CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(12.dp))
                     }
-                    IconButton(onClick = { refreshOpenCode(); refreshCommandCode() }) {
+                    IconButton(onClick = { cards.forEach { refresh(it) } }) {
                         Icon(Icons.Default.Refresh, contentDescription = "全部刷新")
                     }
                 },
@@ -192,26 +212,57 @@ private fun AppScreen() {
                 title = "OpenCode Go",
                 endpoint = "GET opencode.ai/zen/go/v1/usage",
                 accent = Color(0xFF3BA7E0),
-                keyText = openCodeKey,
-                onKeyChange = { openCodeKey = it; prefs.openCodeKey = it },
-                onRefresh = { refreshOpenCode() },
-                busy = openCodeBusy,
-                snapshot = openCode,
+                card = openCode,
                 now = now,
+                keyPlaceholder = "Bearer …",
+                emptyHint = "填入 API Key 后点「刷新」查看 5 小时 / 周 / 月度用量。",
+                onRefresh = { refresh(openCode) },
             )
             ProviderCard(
                 title = "Command Code GOAT",
                 endpoint = "GET api.commandcode.ai/alpha/billing/credits",
                 accent = Color(0xFF9B6BE0),
-                keyText = commandCodeKey,
-                onKeyChange = { commandCodeKey = it; prefs.commandCodeKey = it },
-                onRefresh = { refreshCommandCode() },
-                busy = commandCodeBusy,
-                snapshot = commandCode,
+                card = commandCode,
                 now = now,
+                keyPlaceholder = "user_…",
+                emptyHint = "填入 API Key 后点「刷新」查看 5 小时 / 周 / 月度用量。",
+                onRefresh = { refresh(commandCode) },
+            )
+            ProviderCard(
+                title = "智谱 GLM Coding Plan",
+                endpoint = "GET {host}/api/monitor/usage/quota/limit",
+                accent = Color(0xFF2FA37C),
+                card = glm,
+                now = now,
+                keyPlaceholder = "bigmodel / z.ai key",
+                emptyHint = "填入 Coding Plan 的 API Key（原始 key，不需要加 Bearer）。",
+                onRefresh = { refresh(glm) },
+                options = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "站点",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        ZhipuHost.values().forEach { host ->
+                            FilterChip(
+                                selected = host == zhipuHost,
+                                onClick = {
+                                    zhipuHost = host
+                                    prefs.zhipuHost = host.name
+                                },
+                                label = { Text(host.short, style = MaterialTheme.typography.labelMedium) },
+                            )
+                        }
+                    }
+                },
             )
             Text(
-                "Key 只保存在本机应用私有存储，且只发往对应服务商的官方域名。",
+                "Key 只保存在本机应用私有存储，且只发往对应服务商的官方域名。" +
+                    "智谱只查 5 小时 / 周两个编码积分窗口（套餐没有月度额度）。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 8.dp),
@@ -227,12 +278,12 @@ private fun ProviderCard(
     title: String,
     endpoint: String,
     accent: Color,
-    keyText: String,
-    onKeyChange: (String) -> Unit,
-    onRefresh: () -> Unit,
-    busy: Boolean,
-    snapshot: ProviderSnapshot?,
+    card: CardState,
     now: Long,
+    keyPlaceholder: String,
+    emptyHint: String,
+    onRefresh: () -> Unit,
+    options: (@Composable () -> Unit)? = null,
 ) {
     var visible by remember { mutableStateOf(false) }
 
@@ -265,7 +316,7 @@ private fun ProviderCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (busy) {
+                if (card.busy) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else {
                     IconButton(onClick = onRefresh, modifier = Modifier.size(36.dp)) {
@@ -274,12 +325,14 @@ private fun ProviderCard(
                 }
             }
 
+            options?.invoke()
+
             OutlinedTextField(
-                value = keyText,
-                onValueChange = onKeyChange,
+                value = card.key,
+                onValueChange = card::onKeyChange,
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("API Key") },
-                placeholder = { Text(if (title.startsWith("Open")) "Bearer …" else "user_…") },
+                placeholder = { Text(keyPlaceholder) },
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -301,13 +354,12 @@ private fun ProviderCard(
                 },
             )
 
-            CompactButton(text = "刷新", enabled = !busy, accent = accent, onClick = onRefresh)
+            CompactButton(text = "刷新", enabled = !card.busy, accent = accent, onClick = onRefresh)
 
-            val snap = snapshot
+            val snap = card.snapshot
             if (snap == null) {
                 Text(
-                    if (keyText.isBlank()) "填入 API Key 后点「刷新」查看 5 小时 / 周 / 月度用量。"
-                    else "尚未查询，点「刷新」拉取用量。",
+                    if (card.key.isBlank()) emptyHint else "尚未查询，点「刷新」拉取用量。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

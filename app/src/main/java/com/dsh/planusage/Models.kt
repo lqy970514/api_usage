@@ -23,3 +23,9 @@ data class ProviderSnapshot(
     val error: String? = null,
     val queriedAt: Long = System.currentTimeMillis(),
 )
+
+/** 智谱用量端点分国内站与国际站；同一把 key 两边都能查通，按接入习惯选。 */
+enum class ZhipuHost(val short: String, val label: String, val base: String) {
+    CN("国内站", "国内站 open.bigmodel.cn", "https://open.bigmodel.cn"),
+    INTL("国际站", "国际站 api.z.ai", "https://api.z.ai"),
+}

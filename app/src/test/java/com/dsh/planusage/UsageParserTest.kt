@@ -208,6 +208,127 @@ class UsageParserTest {
         assertTrue(snap.error!!.contains("用量"))
     }
 
+    // ── 智谱 GLM Coding Plan ─────────────────────────────────────────────
+
+    private val zhipuSample = JSONObject(
+        """
+        {"code":200,"msg":"Operation successful","data":{
+          "limits":[
+            {"type":"TIME_LIMIT","unit":5,"number":1,"usage":4000,"currentValue":0,"remaining":4000,
+             "percentage":0,"nextResetTime":1790231642998,
+             "usageDetails":[{"modelCode":"search-prime","usage":0}]},
+            {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":14,"nextResetTime":1789632657808},
+            {"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":7,"nextResetTime":1790145242995}],
+          "level":"max"}}
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `智谱按 unit 分桶，不按 nextResetTime 排序`() {
+        val snap = UsageParser.zhipu(zhipuSample, ZhipuHost.CN.label)
+        assertTrue(snap.error ?: "", snap.ok)
+        // 5h(unit=3) 的 reset 比周(unit=6) 更早，若按时间排序会把两个桶标反。
+        assertEquals(listOf("5 小时", "周"), snap.windows.map { it.title })
+        assertEquals(14.0, snap.windows[0].percent!!, 0.001)
+        assertEquals(7.0, snap.windows[1].percent!!, 0.001)
+        assertEquals(1789632657808L, snap.windows[0].resetsAtMs)
+        assertEquals(1790145242995L, snap.windows[1].resetsAtMs)
+    }
+
+    @Test
+    fun `智谱忽略 TIME_LIMIT（MCP 工具额度）`() {
+        val snap = UsageParser.zhipu(zhipuSample, ZhipuHost.CN.label)
+        assertEquals(2, snap.windows.size)
+        assertTrue(snap.windows.none { it.percent == 0.0 })
+    }
+
+    @Test
+    fun `智谱按 level 换算积分绝对值`() {
+        val snap = UsageParser.zhipu(zhipuSample, ZhipuHost.CN.label)
+        // Max：5h 额度 28,000、周 140,000；14% × 28000 = 3920，7% × 140000 = 9800
+        assertEquals("≈ 3,920 / 28,000 积分", snap.windows[0].usedText)
+        assertEquals("≈ 9,800 / 140,000 积分", snap.windows[1].usedText)
+        assertTrue(snap.facts.contains("套餐" to "Max"))
+        assertTrue(snap.facts.contains("站点" to ZhipuHost.CN.label))
+    }
+
+    @Test
+    fun `智谱没有月度窗口`() {
+        val snap = UsageParser.zhipu(zhipuSample, ZhipuHost.INTL.label)
+        assertTrue(snap.windows.none { it.title == "月度" })
+        assertTrue(snap.facts.contains("站点" to ZhipuHost.INTL.label))
+    }
+
+    @Test
+    fun `智谱老套餐只返回一条 TOKENS_LIMIT 时降级为只显示 5 小时`() {
+        // unit 缺失（老套餐）→ 兜底填第一个槽位，即 5 小时。
+        val snap = UsageParser.zhipu(
+            JSONObject(
+                """{"code":200,"data":{"limits":[
+                   {"type":"TOKENS_LIMIT","percentage":42,"nextResetTime":1790145242995}],"level":"pro"}}""",
+            ),
+            ZhipuHost.CN.label,
+        )
+        assertEquals(listOf("5 小时"), snap.windows.map { it.title })
+        assertEquals(42.0, snap.windows[0].percent!!, 0.001)
+        // Pro：5h 额度 12,000；42% × 12000 = 5040
+        assertEquals("≈ 5,040 / 12,000 积分", snap.windows[0].usedText)
+    }
+
+    @Test
+    fun `智谱 unit 陌生时无 reset 的优先归 5 小时，其余按 reset 升序填空位`() {
+        val snap = UsageParser.zhipu(
+            JSONObject(
+                """{"code":200,"data":{"limits":[
+                   {"type":"TOKENS_LIMIT","unit":9,"percentage":11,"nextResetTime":200},
+                   {"type":"TOKENS_LIMIT","unit":9,"percentage":22},
+                   {"type":"TOKENS_LIMIT","unit":9,"percentage":33,"nextResetTime":100}],"level":"lite"}}""",
+            ),
+            ZhipuHost.CN.label,
+        )
+        // 无 reset 的 22% 先占 5 小时槽；剩下按 reset 升序（100 先于 200）→ 33% 占周槽。
+        assertEquals(22.0, snap.windows[0].percent!!, 0.001)
+        assertEquals(33.0, snap.windows[1].percent!!, 0.001)
+    }
+
+    @Test
+    fun `智谱未知 level 只显示百分比不硬猜额度`() {
+        val snap = UsageParser.zhipu(
+            JSONObject(
+                """{"code":200,"data":{"limits":[
+                   {"type":"TOKENS_LIMIT","unit":3,"percentage":10,"nextResetTime":200}],"level":"future"}}""",
+            ),
+            ZhipuHost.CN.label,
+        )
+        assertTrue(snap.ok)
+        assertEquals("已用 10%", snap.windows[0].usedText)
+        assertTrue(snap.facts.contains("套餐" to "future"))
+    }
+
+    @Test
+    fun `智谱 code 非 200 时把上游 msg 带进错误`() {
+        val snap = UsageParser.zhipu(
+            JSONObject("""{"code":1001,"msg":"Header中未收到Authorization参数","success":false}"""),
+            ZhipuHost.CN.label,
+        )
+        assertFalse(snap.ok)
+        assertTrue(snap.error!!.contains("1001"))
+        assertTrue(snap.error!!.contains("Authorization"))
+    }
+
+    @Test
+    fun `智谱只有 TIME_LIMIT 时给出错误而不是空的成功`() {
+        val snap = UsageParser.zhipu(
+            JSONObject(
+                """{"code":200,"data":{"limits":[
+                   {"type":"TIME_LIMIT","unit":5,"percentage":0,"nextResetTime":200}],"level":"max"}}""",
+            ),
+            ZhipuHost.CN.label,
+        )
+        assertFalse(snap.ok)
+        assertTrue(snap.error!!.contains("5 小时"))
+    }
+
     // ── 展示辅助 ─────────────────────────────────────────────────────────
 
     @Test
@@ -222,6 +343,8 @@ class UsageParserTest {
     @Test
     fun `金额与百分比格式化`() {
         assertEquals("\$35.57", money(35.5731))
+        assertEquals("28,000", credits(28000.0))
+        assertEquals("0", credits(0.0))
         assertEquals("--", percentText(null))
         assertEquals("51%", percentText(50.8188))
     }
