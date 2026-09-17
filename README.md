@@ -62,14 +62,14 @@ app/src/main/java/com/dsh/planusage/
 ## 构建
 
 ```powershell
-# 本机已装 JDK 17 + Gradle 8.9 + Android SDK 35
-cd C:\Users\1\Documents\.dshs\test\plan-usage-android
+# 需要 JDK 17 + Gradle 8.9 + Android SDK（compileSdk 35）
+cd plan-usage-android
 
-# 纯解析层单测（18 个用例，样本取自笔记里的实测响应）
+# 纯解析层单测（18 个用例，样本取自实测响应）
 gradle testReleaseUnitTest
 
-# 出包
-gradle assembleRelease --offline
+# 出包（依赖已缓存时可加 --offline）
+gradle assembleRelease
 ```
 
 产物：`app\build\outputs\apk\release\app-release.apk`（用 debug keystore 签名，可直接侧载安装）。
